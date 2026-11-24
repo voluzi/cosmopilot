@@ -25,6 +25,32 @@ expose:
   - On most cloud providers, this creates a dedicated Load Balancer mapped to the node.
   - Offers better performance but incurs higher costs due to the additional infrastructure.
 
+### P2P through a Gateway
+
+Set `expose.p2p: true` and use `expose.gateway` in place of `expose.p2pServiceType`
+to attach to a Gateway TCP listener. Cosmopilot manages `TCPRoute` resources as
+`gateway.networking.k8s.io/v1`. This requires Gateway API CRDs **v1.6.0 or later**
+and a Gateway implementation that supports TCPRoute.
+
+#### Upgrading from v1alpha2
+
+1. Before upgrading Cosmopilot, move to a bundle supported by your Gateway
+   implementation that serves both TCPRoute versions, such as Gateway API
+   v1.6.0 or v1.7.0 Experimental.
+2. Upgrade Cosmopilot. Check that the Gateway accepts the existing routes and
+   that peers can still connect to each listener from outside the cluster.
+3. You can switch to a Standard bundle once every client has stopped using
+   `v1alpha2`. Follow your Gateway implementation's and the
+   [Gateway API bundle's upgrade guidance](https://github.com/kubernetes-sigs/gateway-api/releases/tag/v1.6.0)
+   to update the CRDs in place. Keep the existing TCPRoutes and CRDs; deleting
+   and recreating them is unnecessary.
+
+On a cluster that serves only `v1alpha2`, existing TCPRoutes stay installed, but
+Cosmopilot stops creating, updating, or cleaning them up until the CRDs serve
+`v1`. A ChainNode in Gateway mode keeps its P2P Service if one already exists,
+does not create a replacement, and clears its advertised public address.
+Cosmoseed falls back to its P2P expose Service.
+
 ## Exposing API Endpoints
 
 API endpoints can be enabled through:

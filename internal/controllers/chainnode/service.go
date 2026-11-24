@@ -13,7 +13,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
-	gwapiv1a2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
 
 	appsv1 "github.com/voluzi/cosmopilot/v5/api/v1"
 	"github.com/voluzi/cosmopilot/v5/internal/chainutils"
@@ -75,7 +74,7 @@ func (r *Reconciler) ensureServices(ctx context.Context, chainNode *appsv1.Chain
 				return fmt.Errorf("failed to ensure TCPRoute for %s: %w", chainNode.GetName(), err)
 			}
 			if !applied {
-				logger.Info("gateway api crds not installed, preserving existing P2P service")
+				logger.Info("TCPRoute v1 is not served, preserving existing P2P service if present")
 				return r.clearPublicAddressIfSet(ctx, chainNode)
 			}
 			if _, err := controllers.DeleteIfControlledBy(ctx, r.Client, p2p, chainNode); err != nil {
@@ -244,9 +243,9 @@ func (r *Reconciler) clearPublicAddressIfSet(ctx context.Context, chainNode *app
 	return r.Status().Update(ctx, chainNode)
 }
 
-func (r *Reconciler) getP2pTCPRouteSpec(chainNode *appsv1.ChainNode) (*gwapiv1a2.TCPRoute, error) {
+func (r *Reconciler) getP2pTCPRouteSpec(chainNode *appsv1.ChainNode) (*gwapiv1.TCPRoute, error) {
 	port := gwapiv1.PortNumber(chainutils.P2pPort)
-	route := &gwapiv1a2.TCPRoute{
+	route := &gwapiv1.TCPRoute{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      fmt.Sprintf("%s-p2p", chainNode.GetName()),
 			Namespace: chainNode.GetNamespace(),
@@ -254,15 +253,15 @@ func (r *Reconciler) getP2pTCPRouteSpec(chainNode *appsv1.ChainNode) (*gwapiv1a2
 				controllers.LabelChainNode: chainNode.GetName(),
 			}),
 		},
-		Spec: gwapiv1a2.TCPRouteSpec{
+		Spec: gwapiv1.TCPRouteSpec{
 			CommonRouteSpec: gwapiv1.CommonRouteSpec{
 				ParentRefs: []gwapiv1.ParentReference{
 					chainNode.Spec.Expose.GetGatewayParentRef(),
 				},
 			},
-			Rules: []gwapiv1a2.TCPRouteRule{
+			Rules: []gwapiv1.TCPRouteRule{
 				{
-					BackendRefs: []gwapiv1a2.BackendRef{
+					BackendRefs: []gwapiv1.BackendRef{
 						{
 							BackendObjectReference: gwapiv1.BackendObjectReference{
 								Name: gwapiv1.ObjectName(fmt.Sprintf("%s-internal", chainNode.GetName())),

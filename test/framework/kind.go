@@ -3,6 +3,7 @@ package framework
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -23,6 +24,7 @@ import (
 	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v6/apis/volumesnapshot/v1"
 
 	appsv1 "github.com/voluzi/cosmopilot/v5/api/v1"
+	"github.com/voluzi/cosmopilot/v5/pkg/utils"
 )
 
 const (
@@ -274,18 +276,71 @@ func (f *KindFramework) LoadImage(image string) error {
 // That path is the one the tag-only image resolution bug lived on, and it is otherwise untestable
 // without publishing a second copy of an app image somewhere CI can reach.
 func (f *KindFramework) MirrorImage(src, dst string) error {
+	platform := "linux/" + runtime.GOARCH
+	source, err := f.imageForPlatform(src, platform)
+	if err != nil {
+		return err
+	}
+
+	dir, err := os.MkdirTemp("", "cosmopilot-e2e-image-")
+	if err != nil {
+		return fmt.Errorf("create image archive directory: %w", err)
+	}
+	defer os.RemoveAll(dir)
+
+	archive := filepath.Join(dir, "image.tar")
 	for _, args := range [][]string{
-		{"pull", src},
-		{"tag", src, dst},
+		{"pull", "--platform", platform, source},
+		{"tag", source, dst},
+		{"image", "save", "--platform", platform, "--output", archive, dst},
 	} {
 		cmd := exec.CommandContext(f.ctx, "docker", args...)
 		if output, err := cmd.CombinedOutput(); err != nil {
-			// Report the whole command: a `tag` failure is about the destination reference, which
-			// naming only the source would hide.
 			return fmt.Errorf("docker %s: %s: %w", strings.Join(args, " "), string(output), err)
 		}
 	}
-	return f.LoadImage(dst)
+
+	cmd := exec.CommandContext(f.ctx, f.kindPath, "load", "image-archive", archive, "--name", f.cfg.ClusterName)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("load image %s into Kind: %s: %w", dst, string(output), err)
+	}
+	return nil
+}
+
+// Resolve the runnable manifest directly so Kind never tries to unpack an attached attestation.
+func (f *KindFramework) imageForPlatform(image, platform string) (string, error) {
+	output, err := exec.CommandContext(f.ctx, "docker", "manifest", "inspect", image).Output()
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			return "", fmt.Errorf("inspect image %s: %s: %w", image, strings.TrimSpace(string(exitErr.Stderr)), err)
+		}
+		return "", fmt.Errorf("inspect image %s: %w", image, err)
+	}
+
+	var index struct {
+		Manifests []struct {
+			Digest   string
+			Platform struct {
+				OS           string
+				Architecture string
+			}
+		}
+	}
+	if err := json.Unmarshal(output, &index); err != nil {
+		return "", fmt.Errorf("decode manifest for %s: %w", image, err)
+	}
+	if index.Manifests == nil {
+		return image, nil
+	}
+
+	for _, manifest := range index.Manifests {
+		if manifest.Digest != "" && manifest.Platform.OS+"/"+manifest.Platform.Architecture == platform {
+			ref, _, _ := strings.Cut(image, "@")
+			repository, _ := utils.SplitImageRef(ref)
+			return utils.JoinImageRef(repository, manifest.Digest), nil
+		}
+	}
+	return "", fmt.Errorf("image %s has no manifest for %s", image, platform)
 }
 
 // DeployController deploys the controller to the cluster using Helm.

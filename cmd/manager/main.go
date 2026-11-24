@@ -21,7 +21,6 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
-	gwapiv1a2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
 
 	appsv1 "github.com/voluzi/cosmopilot/v5/api/v1"
 	"github.com/voluzi/cosmopilot/v5/internal/controllers"
@@ -63,11 +62,6 @@ func main() {
 
 	if err := gwapiv1.AddToScheme(scheme); err != nil {
 		setupLog.Error(err, "unable to add gateway api v1 types to scheme")
-		os.Exit(1)
-	}
-
-	if err := gwapiv1a2.AddToScheme(scheme); err != nil {
-		setupLog.Error(err, "unable to add gateway api v1alpha2 types to scheme")
 		os.Exit(1)
 	}
 

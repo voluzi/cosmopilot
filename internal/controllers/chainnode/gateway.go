@@ -9,7 +9,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
-	gwapiv1a2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
 
 	appsv1 "github.com/voluzi/cosmopilot/v5/api/v1"
 	"github.com/voluzi/cosmopilot/v5/internal/chainutils"
@@ -223,7 +222,7 @@ func (r *Reconciler) listChainNodeHTTPRoutes(ctx context.Context, chainNode *app
 }
 
 func (r *Reconciler) cleanupTCPRoute(ctx context.Context, chainNode *appsv1.ChainNode) error {
-	_, err := controllers.DeleteIfControlledBy(ctx, r.Client, &gwapiv1a2.TCPRoute{
+	_, err := controllers.DeleteIfControlledBy(ctx, r.Client, &gwapiv1.TCPRoute{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      fmt.Sprintf("%s-p2p", chainNode.GetName()),
 			Namespace: chainNode.GetNamespace(),

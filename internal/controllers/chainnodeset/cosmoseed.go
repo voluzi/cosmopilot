@@ -23,7 +23,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
-	gwapiv1a2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
 
 	"github.com/voluzi/cosmopilot/v5/api/v1"
 	"github.com/voluzi/cosmopilot/v5/internal/chainutils"
@@ -199,7 +198,7 @@ func (r *Reconciler) maybeCleanupSeedNodes(ctx context.Context, nodeSet *v1.Chai
 	}
 
 	// Cleanup TCPRoutes by label (can't use GetInstances() since it returns 0 when disabled)
-	tcpRouteList := &gwapiv1a2.TCPRouteList{}
+	tcpRouteList := &gwapiv1.TCPRouteList{}
 	if err := r.List(ctx, tcpRouteList, client.InNamespace(nodeSet.GetNamespace()), client.MatchingLabels{
 		controllers.LabelApp:          controllers.CosmoseedName,
 		controllers.LabelChainNodeSet: nodeSet.GetName(),
@@ -662,7 +661,7 @@ func (r *Reconciler) ensureSeedServices(ctx context.Context, nodeSet *v1.ChainNo
 				}
 			} else {
 				// LoadBalancer/NodePort mode: delete any stale TCPRoute
-				if _, err = controllers.DeleteIfControlledBy(ctx, r.Client, &gwapiv1a2.TCPRoute{
+				if _, err = controllers.DeleteIfControlledBy(ctx, r.Client, &gwapiv1.TCPRoute{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      fmt.Sprintf("%s-seed-%d-p2p", nodeSet.GetName(), i),
 						Namespace: nodeSet.GetNamespace(),
@@ -710,7 +709,7 @@ func (r *Reconciler) ensureSeedServices(ctx context.Context, nodeSet *v1.ChainNo
 	}
 
 	// Cleanup stale TCPRoutes (e.g., after scale-down or switching from gateway to service mode)
-	tcpRouteList := &gwapiv1a2.TCPRouteList{}
+	tcpRouteList := &gwapiv1.TCPRouteList{}
 	if err = r.List(ctx, tcpRouteList, client.InNamespace(nodeSet.GetNamespace()), client.MatchingLabels{
 		controllers.LabelApp:          controllers.CosmoseedName,
 		controllers.LabelChainNodeSet: nodeSet.GetName(),
@@ -991,7 +990,7 @@ func (r *Reconciler) getCosmoseedIngress(nodeSet *v1.ChainNodeSet) (*netv1.Ingre
 	return ingress, controllerutil.SetControllerReference(nodeSet, ingress, r.Scheme)
 }
 
-func (r *Reconciler) getSeedTCPRouteSpec(nodeSet *v1.ChainNodeSet, backendSvcName string, index int) (*gwapiv1a2.TCPRoute, error) {
+func (r *Reconciler) getSeedTCPRouteSpec(nodeSet *v1.ChainNodeSet, backendSvcName string, index int) (*gwapiv1.TCPRoute, error) {
 	port := gwapiv1.PortNumber(cosmoseedP2pPort)
 	gwRef := nodeSet.Spec.Cosmoseed.Expose.Gateway
 	// Each seed instance attaches to a distinct Gateway listener at base+index so multiple
@@ -1000,7 +999,7 @@ func (r *Reconciler) getSeedTCPRouteSpec(nodeSet *v1.ChainNodeSet, backendSvcNam
 	parentRef := gwRef.GatewayRef.GetParentRef()
 	parentRef.Port = ptr.To(gwapiv1.PortNumber(listenerPort))
 
-	route := &gwapiv1a2.TCPRoute{
+	route := &gwapiv1.TCPRoute{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      fmt.Sprintf("%s-seed-%d-p2p", nodeSet.GetName(), index),
 			Namespace: nodeSet.GetNamespace(),
@@ -1009,13 +1008,13 @@ func (r *Reconciler) getSeedTCPRouteSpec(nodeSet *v1.ChainNodeSet, backendSvcNam
 				controllers.LabelChainNodeSet: nodeSet.GetName(),
 			},
 		},
-		Spec: gwapiv1a2.TCPRouteSpec{
+		Spec: gwapiv1.TCPRouteSpec{
 			CommonRouteSpec: gwapiv1.CommonRouteSpec{
 				ParentRefs: []gwapiv1.ParentReference{parentRef},
 			},
-			Rules: []gwapiv1a2.TCPRouteRule{
+			Rules: []gwapiv1.TCPRouteRule{
 				{
-					BackendRefs: []gwapiv1a2.BackendRef{
+					BackendRefs: []gwapiv1.BackendRef{
 						{
 							BackendObjectReference: gwapiv1.BackendObjectReference{
 								Name: gwapiv1.ObjectName(backendSvcName),

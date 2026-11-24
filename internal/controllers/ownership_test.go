@@ -16,7 +16,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
-	gwapiv1a2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
 )
 
 func ownershipScheme(t *testing.T) *runtime.Scheme {
@@ -24,7 +23,6 @@ func ownershipScheme(t *testing.T) *runtime.Scheme {
 	scheme := runtime.NewScheme()
 	require.NoError(t, corev1.AddToScheme(scheme))
 	require.NoError(t, gwapiv1.Install(scheme))
-	require.NoError(t, gwapiv1a2.Install(scheme))
 	return scheme
 }
 
@@ -168,9 +166,9 @@ func TestEnsureRoutesRefuseForeignRoutes(t *testing.T) {
 		},
 		{
 			name:    "TCPRoute",
-			current: &gwapiv1a2.TCPRoute{}, desired: &gwapiv1a2.TCPRoute{},
+			current: &gwapiv1.TCPRoute{}, desired: &gwapiv1.TCPRoute{},
 			ensure: func(c client.Client, o client.Object) error {
-				_, err := EnsureTCPRoute(context.Background(), c, o.(*gwapiv1a2.TCPRoute))
+				_, err := EnsureTCPRoute(context.Background(), c, o.(*gwapiv1.TCPRoute))
 				return err
 			},
 		},

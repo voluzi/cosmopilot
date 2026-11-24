@@ -39,7 +39,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
-	gwapiv1a2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
 
 	appsv1 "github.com/voluzi/cosmopilot/v5/api/v1"
 	"github.com/voluzi/cosmopilot/v5/internal/controllers"
@@ -2517,7 +2516,6 @@ func nativeReviewFixesAPI(t *testing.T, admin client.Client, r *Reconciler, temp
 		http.DefaultTransport = &nodeUtilsTransport
 		t.Cleanup(func() { http.DefaultTransport = originalTransport })
 		require.NoError(t, gwapiv1.Install(r.Scheme))
-		require.NoError(t, gwapiv1a2.Install(r.Scheme))
 		var retentionFaults atomic.Int32
 		retentionPath := ""
 		managerConfig := rest.CopyConfig(r.RestConfig)

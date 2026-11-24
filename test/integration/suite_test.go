@@ -7,6 +7,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"sigs.k8s.io/controller-runtime/pkg/envtest"
 
 	"github.com/voluzi/cosmopilot/v5/test/framework"
 )
@@ -33,6 +34,13 @@ var _ = BeforeSuite(func() {
 	)
 
 	err := tf.Setup(ctx)
+	Expect(err).NotTo(HaveOccurred())
+
+	By("Installing the Gateway API v1.7.0 Standard TCPRoute CRD")
+	_, err = envtest.InstallCRDs(tf.RestConfig(), envtest.CRDInstallOptions{
+		Paths:              []string{"../testdata/gateway-api/v1.7.0-standard"},
+		ErrorIfPathMissing: true,
+	})
 	Expect(err).NotTo(HaveOccurred())
 
 	By("Enabling mock stats for VPA testing")
