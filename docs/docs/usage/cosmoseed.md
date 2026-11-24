@@ -25,7 +25,7 @@ For `ChainNodeSet` node groups and Cosmoseed, automatic peer discovery includes 
 
 ### P2P through a Gateway
 
-To use a Gateway for seed P2P traffic, configure `cosmoseed.expose.gateway`
+Set `cosmoseed.expose.p2p: true` and configure `cosmoseed.expose.gateway`
 instead of `cosmoseed.expose.p2pServiceType`. Cosmopilot creates one
 `gateway.networking.k8s.io/v1` TCPRoute per seed. Configure a TCP listener for
 each seed, starting at `expose.gateway.port` and adding one for each successive
