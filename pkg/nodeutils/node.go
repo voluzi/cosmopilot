@@ -16,8 +16,8 @@ import (
 	"github.com/shirou/gopsutil/process"
 	log "github.com/sirupsen/logrus"
 
-	"github.com/voluzi/cosmopilot/v5/internal/chainutils"
-	"github.com/voluzi/cosmopilot/v5/pkg/statscollector"
+	"github.com/voluzi/cosmopilot/v6/internal/chainutils"
+	"github.com/voluzi/cosmopilot/v6/pkg/statscollector"
 )
 
 const (

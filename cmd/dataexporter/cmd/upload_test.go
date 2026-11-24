@@ -12,7 +12,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/voluzi/cosmopilot/v5/pkg/dataexporter"
+	"github.com/voluzi/cosmopilot/v6/pkg/dataexporter"
 )
 
 type uploadTestExporter struct {

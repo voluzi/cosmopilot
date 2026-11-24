@@ -7,10 +7,10 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 
-	appsv1 "github.com/voluzi/cosmopilot/v5/api/v1"
-	"github.com/voluzi/cosmopilot/v5/internal/chainutils"
-	"github.com/voluzi/cosmopilot/v5/pkg/dataexporter"
-	"github.com/voluzi/cosmopilot/v5/pkg/images"
+	appsv1 "github.com/voluzi/cosmopilot/v6/api/v1"
+	"github.com/voluzi/cosmopilot/v6/internal/chainutils"
+	"github.com/voluzi/cosmopilot/v6/pkg/dataexporter"
+	"github.com/voluzi/cosmopilot/v6/pkg/images"
 )
 
 func (r *Reconciler) buildDataInitPod(app *chainutils.App, chainNode *appsv1.ChainNode, pvc *corev1.PersistentVolumeClaim) (*corev1.Pod, error) {

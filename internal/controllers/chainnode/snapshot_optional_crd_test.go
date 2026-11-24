@@ -26,10 +26,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
-	appsv1 "github.com/voluzi/cosmopilot/v5/api/v1"
-	"github.com/voluzi/cosmopilot/v5/internal/controllers"
-	"github.com/voluzi/cosmopilot/v5/internal/datasnapshot"
-	"github.com/voluzi/cosmopilot/v5/internal/exportprotocol"
+	appsv1 "github.com/voluzi/cosmopilot/v6/api/v1"
+	"github.com/voluzi/cosmopilot/v6/internal/controllers"
+	"github.com/voluzi/cosmopilot/v6/internal/datasnapshot"
+	"github.com/voluzi/cosmopilot/v6/internal/exportprotocol"
 )
 
 func TestChainNodeManagerWithoutSnapshotCRDs(t *testing.T) {

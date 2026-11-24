@@ -3,7 +3,7 @@ package images
 import (
 	corev1 "k8s.io/api/core/v1"
 
-	"github.com/voluzi/cosmopilot/v5/pkg/utils"
+	"github.com/voluzi/cosmopilot/v6/pkg/utils"
 )
 
 // mutableTags tracks republished latest/edge builds, including cosmosigner PKCS#11 variants.

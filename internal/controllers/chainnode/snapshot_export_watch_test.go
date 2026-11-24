@@ -13,7 +13,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	"github.com/voluzi/cosmopilot/v5/internal/exportprotocol"
+	"github.com/voluzi/cosmopilot/v6/internal/exportprotocol"
 )
 
 func TestNativeExportEventsRouteOnlyAttributedOwners(t *testing.T) {

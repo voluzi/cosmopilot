@@ -5,7 +5,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
-	appsv1 "github.com/voluzi/cosmopilot/v5/api/v1"
+	appsv1 "github.com/voluzi/cosmopilot/v6/api/v1"
 )
 
 // TestGuardInheritedLabels verifies genuine user labels are propagated to the guard while every

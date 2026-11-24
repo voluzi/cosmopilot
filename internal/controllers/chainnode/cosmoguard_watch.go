@@ -7,7 +7,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	appsv1 "github.com/voluzi/cosmopilot/v5/api/v1"
+	appsv1 "github.com/voluzi/cosmopilot/v6/api/v1"
 )
 
 func (r *Reconciler) cosmoGuardConfigMapRequests(ctx context.Context, obj client.Object) []reconcile.Request {

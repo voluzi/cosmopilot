@@ -16,7 +16,7 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/utils/ptr"
 
-	"github.com/voluzi/cosmopilot/v5/pkg/images"
+	"github.com/voluzi/cosmopilot/v6/pkg/images"
 )
 
 type PvcHelper struct {

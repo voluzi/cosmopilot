@@ -11,9 +11,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 
-	appsv1 "github.com/voluzi/cosmopilot/v5/api/v1"
-	"github.com/voluzi/cosmopilot/v5/internal/chainutils"
-	"github.com/voluzi/cosmopilot/v5/internal/controllers"
+	appsv1 "github.com/voluzi/cosmopilot/v6/api/v1"
+	"github.com/voluzi/cosmopilot/v6/internal/chainutils"
+	"github.com/voluzi/cosmopilot/v6/internal/controllers"
 )
 
 const (

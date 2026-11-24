@@ -28,8 +28,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
-	v1 "github.com/voluzi/cosmopilot/v5/api/v1"
-	"github.com/voluzi/cosmopilot/v5/internal/controllers"
+	v1 "github.com/voluzi/cosmopilot/v6/api/v1"
+	"github.com/voluzi/cosmopilot/v6/internal/controllers"
 )
 
 func TestConfigRolloutState(t *testing.T) {

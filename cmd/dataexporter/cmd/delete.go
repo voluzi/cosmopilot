@@ -6,8 +6,8 @@ import (
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 
-	"github.com/voluzi/cosmopilot/v5/pkg/dataexporter"
-	"github.com/voluzi/cosmopilot/v5/pkg/environ"
+	"github.com/voluzi/cosmopilot/v6/pkg/dataexporter"
+	"github.com/voluzi/cosmopilot/v6/pkg/environ"
 )
 
 func newDeleteCmd() *cobra.Command {

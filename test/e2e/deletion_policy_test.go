@@ -19,10 +19,10 @@ import (
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	appsv1 "github.com/voluzi/cosmopilot/v5/api/v1"
-	managedcosmosigner "github.com/voluzi/cosmopilot/v5/internal/cosmosigner"
-	"github.com/voluzi/cosmopilot/v5/internal/resourcecleanup"
-	"github.com/voluzi/cosmopilot/v5/test/e2e/apps"
+	appsv1 "github.com/voluzi/cosmopilot/v6/api/v1"
+	managedcosmosigner "github.com/voluzi/cosmopilot/v6/internal/cosmosigner"
+	"github.com/voluzi/cosmopilot/v6/internal/resourcecleanup"
+	"github.com/voluzi/cosmopilot/v6/test/e2e/apps"
 )
 
 var _ = Describe("Deletion policy", func() {

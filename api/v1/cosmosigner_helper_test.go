@@ -5,7 +5,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 
-	"github.com/voluzi/cosmopilot/v5/pkg/images"
+	"github.com/voluzi/cosmopilot/v6/pkg/images"
 )
 
 // TestCosmosignerGetImagePrecedence verifies the image resolution order: an explicit per-CR

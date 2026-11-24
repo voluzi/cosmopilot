@@ -16,10 +16,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	appsv1 "github.com/voluzi/cosmopilot/v5/api/v1"
-	"github.com/voluzi/cosmopilot/v5/internal/controllers"
-	"github.com/voluzi/cosmopilot/v5/internal/cosmosigner"
-	"github.com/voluzi/cosmopilot/v5/internal/resourcecleanup"
+	appsv1 "github.com/voluzi/cosmopilot/v6/api/v1"
+	"github.com/voluzi/cosmopilot/v6/internal/controllers"
+	"github.com/voluzi/cosmopilot/v6/internal/cosmosigner"
+	"github.com/voluzi/cosmopilot/v6/internal/resourcecleanup"
 )
 
 func TestReconcileInstallsResourceCleanupFinalizerBeforeDurableCreation(t *testing.T) {

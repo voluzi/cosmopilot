@@ -6,7 +6,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/voluzi/cosmopilot/v5/pkg/dataexporter"
+	"github.com/voluzi/cosmopilot/v6/pkg/dataexporter"
 )
 
 func TestStrictResultEnvelope(t *testing.T) {

@@ -16,10 +16,10 @@ import (
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
-	appsv1 "github.com/voluzi/cosmopilot/v5/api/v1"
-	"github.com/voluzi/cosmopilot/v5/internal/controllers"
-	"github.com/voluzi/cosmopilot/v5/internal/k8s"
-	"github.com/voluzi/cosmopilot/v5/pkg/images"
+	appsv1 "github.com/voluzi/cosmopilot/v6/api/v1"
+	"github.com/voluzi/cosmopilot/v6/internal/controllers"
+	"github.com/voluzi/cosmopilot/v6/internal/k8s"
+	"github.com/voluzi/cosmopilot/v6/pkg/images"
 )
 
 const s3Exporter = "s3-exporter"

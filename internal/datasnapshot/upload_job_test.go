@@ -13,8 +13,8 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/utils/ptr"
 
-	appsv1 "github.com/voluzi/cosmopilot/v5/api/v1"
-	"github.com/voluzi/cosmopilot/v5/internal/controllers"
+	appsv1 "github.com/voluzi/cosmopilot/v6/api/v1"
+	"github.com/voluzi/cosmopilot/v6/internal/controllers"
 )
 
 func requireUploadJobHardening(t *testing.T, job *batchv1.Job, wantRequests corev1.ResourceList) {

@@ -22,14 +22,14 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	appsv1 "github.com/voluzi/cosmopilot/v5/api/v1"
-	"github.com/voluzi/cosmopilot/v5/internal/controllers"
-	"github.com/voluzi/cosmopilot/v5/internal/datasnapshot"
-	"github.com/voluzi/cosmopilot/v5/internal/exportprotocol"
-	"github.com/voluzi/cosmopilot/v5/internal/k8s"
-	"github.com/voluzi/cosmopilot/v5/pkg/images"
-	"github.com/voluzi/cosmopilot/v5/pkg/nodeutils"
-	"github.com/voluzi/cosmopilot/v5/pkg/utils"
+	appsv1 "github.com/voluzi/cosmopilot/v6/api/v1"
+	"github.com/voluzi/cosmopilot/v6/internal/controllers"
+	"github.com/voluzi/cosmopilot/v6/internal/datasnapshot"
+	"github.com/voluzi/cosmopilot/v6/internal/exportprotocol"
+	"github.com/voluzi/cosmopilot/v6/internal/k8s"
+	"github.com/voluzi/cosmopilot/v6/pkg/images"
+	"github.com/voluzi/cosmopilot/v6/pkg/nodeutils"
+	"github.com/voluzi/cosmopilot/v6/pkg/utils"
 )
 
 type SnapshotIntegrityStatus string

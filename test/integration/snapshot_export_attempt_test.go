@@ -15,9 +15,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
-	appsv1 "github.com/voluzi/cosmopilot/v5/api/v1"
-	"github.com/voluzi/cosmopilot/v5/internal/exportprotocol"
-	"github.com/voluzi/cosmopilot/v5/pkg/dataexporter"
+	appsv1 "github.com/voluzi/cosmopilot/v6/api/v1"
+	"github.com/voluzi/cosmopilot/v6/internal/exportprotocol"
+	"github.com/voluzi/cosmopilot/v6/pkg/dataexporter"
 )
 
 var _ = Describe("Native export attempt recovery", func() {

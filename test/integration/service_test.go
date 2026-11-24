@@ -12,7 +12,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
-	"github.com/voluzi/cosmopilot/v5/internal/controllers"
+	"github.com/voluzi/cosmopilot/v6/internal/controllers"
 )
 
 var _ = Describe("EnsureService", func() {

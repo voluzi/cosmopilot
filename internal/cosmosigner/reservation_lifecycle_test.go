@@ -18,7 +18,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	appsv1 "github.com/voluzi/cosmopilot/v5/api/v1"
+	appsv1 "github.com/voluzi/cosmopilot/v6/api/v1"
 )
 
 func TestEnsureConsensusKeyReservationOwnerFinalizerPersistsBeforeClaim(t *testing.T) {

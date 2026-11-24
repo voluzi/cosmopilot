@@ -14,12 +14,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
-	appsv1 "github.com/voluzi/cosmopilot/v5/api/v1"
-	"github.com/voluzi/cosmopilot/v5/internal/cometbft"
-	"github.com/voluzi/cosmopilot/v5/internal/controllers"
-	"github.com/voluzi/cosmopilot/v5/internal/cosmosigner"
-	"github.com/voluzi/cosmopilot/v5/internal/exportprotocol"
-	"github.com/voluzi/cosmopilot/v5/internal/resourcecleanup"
+	appsv1 "github.com/voluzi/cosmopilot/v6/api/v1"
+	"github.com/voluzi/cosmopilot/v6/internal/cometbft"
+	"github.com/voluzi/cosmopilot/v6/internal/controllers"
+	"github.com/voluzi/cosmopilot/v6/internal/cosmosigner"
+	"github.com/voluzi/cosmopilot/v6/internal/exportprotocol"
+	"github.com/voluzi/cosmopilot/v6/internal/resourcecleanup"
 )
 
 // finalizeResources stops every signing workload before applying durable-resource policy. Consensus
