@@ -590,10 +590,10 @@ application image; changing the source only takes effect when the volume is recr
 `persistence.snapshots.exportTarball.protocol: source-v1` selects the native S3
 protocol with Secret credentials. Omitted protocol and `legacy` preserve the legacy
 export lifecycle. Native GCS and cloud ServiceAccount/ambient authentication are
-not supported. The default exporter image is `ghcr.io/voluzi/dataexporter:2.3.0`, the
-first with the native commands; publishing that image belongs to the release process.
-An older image selected through `dataExporterImage` fails on the native command
-instead of uploading through the legacy path.
+not supported. The stable default exporter image is `ghcr.io/voluzi/dataexporter:2.3.1`.
+Version 2.3.0 introduced the native commands. An image older than 2.3.0 selected
+through `dataExporterImage` fails on the native command instead of uploading through
+the legacy path.
 
 Install the additive CRDs before the compatible controller. Stop legacy controller
 writers before activating native exports; mixed legacy/new writers over active
